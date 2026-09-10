@@ -9,7 +9,7 @@ on:
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -76,10 +76,48 @@ jobs:
             http://localhost:8080/api/recommendations/generate \
             | tee artifacts/recommendations-generate.json
 
-          curl -fsS http://localhost:8080/api/summary > artifacts/summary-after.json
           curl -fsS http://localhost:8080/api/forecast/evaluation > artifacts/forecast-evaluation.json
           curl -fsS http://localhost:8080/api/forecast/results > artifacts/forecast-results.json
           curl -fsS http://localhost:8080/api/recommendations > artifacts/recommendations.json
+
+      - name: Process included historical traffic video
+        shell: bash
+        run: |
+          set -e
+          curl -fsS -X POST \
+            -F "file=@docs/sample_traffic_video_20s.mp4" \
+            http://localhost:8080/api/import/video \
+            | tee artifacts/import-video.json
+
+          curl -fsS http://localhost:8080/api/videos | tee artifacts/videos.json
+          VIDEO_ID=$(jq -r '.[0].id' artifacts/videos.json)
+          if [ -z "$VIDEO_ID" ] || [ "$VIDEO_ID" = "null" ]; then
+            echo "Could not determine imported video source ID"
+            exit 1
+          fi
+          echo "$VIDEO_ID" > artifacts/video-source-id.txt
+
+          curl -fsS -X POST \
+            "http://localhost:8080/api/videos/${VIDEO_ID}/sample-frames?every_seconds=5&max_frames=20" \
+            | tee artifacts/video-sample-frames.json
+
+          curl -fsS -X POST \
+            "http://localhost:8080/api/videos/${VIDEO_ID}/detect-vehicles?every_seconds=1&max_frames=60&min_area=700" \
+            | tee artifacts/video-detect-vehicles.json
+
+          curl -fsS -X POST \
+            "http://localhost:8080/api/videos/${VIDEO_ID}/detect-incidents?congestion_threshold=3&stalled_seconds=8&replace_existing=true" \
+            | tee artifacts/video-detect-incidents.json
+
+          curl -fsS "http://localhost:8080/api/videos/${VIDEO_ID}/frames" > artifacts/video-frames.json
+          curl -fsS "http://localhost:8080/api/videos/${VIDEO_ID}/detections" > artifacts/video-detections.json
+          curl -fsS http://localhost:8080/api/incidents > artifacts/incidents.json
+          curl -fsS http://localhost:8080/api/analytics/video-detection-summary > artifacts/video-detection-summary.json
+          curl -fsS http://localhost:8080/api/analytics/incident-summary > artifacts/incident-summary.json
+
+      - name: Capture final summary
+        run: |
+          curl -fsS http://localhost:8080/api/summary > artifacts/summary-after.json
 
       - name: Install Playwright Chromium
         run: |
@@ -87,7 +125,7 @@ jobs:
           npm install --no-save playwright
           npx playwright install --with-deps chromium
 
-      - name: Capture real dashboard screenshot
+      - name: Capture real populated dashboard screenshot
         run: |
           node <<'NODE'
           const { chromium } = require('playwright');
